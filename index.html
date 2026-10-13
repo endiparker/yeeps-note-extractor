@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yeeps Note Extractor</title>
+  <style>
+    :root {
+      font-family: Georgia, "Times New Roman", serif;
+      color: #1a1a1a;
+      background: #e8f5dc;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(ellipse at 10% 0%, #d8f0c8 0%, transparent 55%),
+        radial-gradient(ellipse at 90% 100%, #3d6b3a 0%, transparent 50%),
+        linear-gradient(165deg, #e8f5dc 0%, #a8c98a 45%, #5a8f4e 100%);
+    }
+    main {
+      max-width: 52rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 3rem;
+    }
+    h1 {
+      font-size: 1.72rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.35rem;
+    }
+    .sub {
+      margin: 0 0 1.5rem;
+      color: #4a5560;
+      font-size: 0.95rem;
+    }
+    form {
+      display: grid;
+      gap: 0.85rem;
+      margin-bottom: 1.25rem;
+    }
+    label {
+      display: grid;
+      gap: 0.3rem;
+      font-size: 0.9rem;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: end;
+    }
+    .row label {
+      flex: 1 1 8rem;
+    }
+    input[type="file"],
+    select,
+    input[type="number"] {
+      font: inherit;
+      padding: 0.4rem 0.5rem;
+      border: 1px solid #8a96a3;
+      border-radius: 4px;
+      background: #fff;
+    }
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding-bottom: 0.35rem;
+    }
+    .check input {
+      width: 1rem;
+      height: 1rem;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+    }
+    button {
+      font: inherit;
+      padding: 0.5rem 1rem;
+      border: 1px solid #2c3a47;
+      border-radius: 4px;
+      background: #2c3a47;
+      color: #fff;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #fff;
+      color: #2c3a47;
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .error {
+      color: #8b1e1e;
+      background: #f8e4e4;
+      border: 1px solid #d4a0a0;
+      padding: 0.65rem 0.8rem;
+      border-radius: 4px;
+      margin: 0;
+      white-space: pre-wrap;
+    }
+    .error[hidden] {
+      display: none;
+    }
+    .suggest {
+      color: #1a2e1f;
+      background: #e4f0e6;
+      border: 1px solid #9bb89f;
+      padding: 0.6rem 0.8rem;
+      border-radius: 4px;
+      margin: 0;
+      display: grid;
+      gap: 0.55rem;
+    }
+    .suggest[hidden] {
+      display: none;
+    }
+    .suggest p {
+      margin: 0;
+      font-size: 0.95rem;
+    }
+    .suggest .actions {
+      margin: 0;
+    }
+    .limits {
+      margin: 0 0 1.5rem;
+      padding: 0.7rem 1rem;
+      background: #f3efe6;
+      border: 1px solid #c4b89a;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      color: #3a3428;
+    }
+    .limits summary {
+      cursor: pointer;
+      font-weight: 700;
+      list-style-position: inside;
+    }
+    .limits ul {
+      margin: 0.65rem 0 0;
+      padding-left: 1.2rem;
+    }
+    .limits li {
+      margin: 0.35rem 0;
+    }
+    pre {
+      margin: 0;
+      padding: 1rem;
+      background: #1a1f24;
+      color: #e8eef2;
+      border-radius: 6px;
+      overflow: auto;
+      max-height: min(70vh, 48rem);
+      font-size: 0.8rem;
+      line-height: 1.35;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Yeeps Note Extractor</h1>
+    <p class="sub">MusicXML → Yeeps Paint + Note Block &amp; Delay Block list. No server upload (local browser client-only processing).</p>
+
+    <details class="limits">
+      <summary>Limitations (read before converting)</summary>
+      <ul>
+        <li><strong>Sixteenth-note grid only</strong> — timing snaps to sixteenths. 32nds, 64ths, and anything faster than a sixteenth won't place correctly.</li>
+        <li><strong>No tuplets</strong> — triplets, quintuplets, etc. don't map cleanly onto Yeeps wire/delay timing; simplify the score first.</li>
+        <li><strong>Grace notes are skipped</strong> — they are ignored and do not produce note blocks.</li>
+        <li><strong>Tied notes</strong> — only the start of a tie is an onset; continuations are not repeated (intended for Yeeps).</li>
+        <li><strong>Simple scores</strong> — score-partwise MusicXML from MuseScore-style exports. No repeat/ending expansion, no timewise scores.</li>
+        <li><strong>Pitch range</strong> — only pitches covered by Yeeps paints map; others show as <code>No Paint</code>.</li>
+        <li><strong>Tempo</strong> — Yeeps patterns are keyed by <strong>quarter-note</strong> BPM (♩ = 300...33). Metronome markings in other units (e.g. ♪ = 120) are converted to ♩ before snapping.</li>
+        <li><strong>No mid-score tempo changes</strong> — only the first tempo marking is used; the whole piece gets one Yeeps space pattern. Later ritardandi / new metronome marks are ignored.</li>
+      </ul>
+    </details>
+
+    <form id="form">
+      <label>
+        MusicXML / MXL file
+        <input id="file" type="file" accept=".musicxml,.mxl,.xml,application/vnd.recordare.musicxml+xml,application/vnd.recordare.musicxml" required />
+      </label>
+
+      <div id="suggest" class="suggest" hidden>
+        <p id="suggestText"></p>
+        <div class="actions">
+          <button type="button" id="suggestUse">Use detected</button>
+          <button type="button" class="secondary" id="suggestKeep">Keep mine</button>
+        </div>
+      </div>
+
+      <div id="error" class="error" hidden></div>
+
+      <div class="row">
+        <label>
+          Yeeps tempo (♩)
+          <select id="tempo"></select>
+        </label>
+        <label>
+          Force divisions
+          <input id="numDivisions" type="number" min="1" max="64" placeholder="auto from score" />
+        </label>
+        <label class="check">
+          <input id="everyDivision" type="checkbox" />
+          every division
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit" id="convertBtn">Convert</button>
+        <button type="button" class="secondary" id="downloadBtn" disabled>Download .txt</button>
+      </div>
+    </form>
+    <pre id="preview">Output will appear here.</pre>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

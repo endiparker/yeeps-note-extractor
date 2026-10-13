@@ -1,0 +1,448 @@
+/**
+ * Slim MusicXML score-partwise loader/walker for simple Yeeps songs.
+ */
+
+import { snapYeepsTempo } from "./tempos.js";
+
+/**
+ * @param {string} xmlText
+ * @returns {Document}
+ */
+export function parseXmlDocument(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, "application/xml");
+  const err = doc.querySelector("parsererror");
+  if (err) {
+    throw new Error("Invalid XML: " + (err.textContent || "parse error").trim());
+  }
+  return doc;
+}
+
+/**
+ * @param {string | Document} xmlTextOrDoc
+ * @returns {Document}
+ */
+function asDocument(xmlTextOrDoc) {
+  return typeof xmlTextOrDoc === "string"
+    ? parseXmlDocument(xmlTextOrDoc)
+    : xmlTextOrDoc;
+}
+
+/**
+ * @param {Document} doc
+ * @returns {Element}
+ */
+function scorePartwise(doc) {
+  const score = doc.querySelector("score-partwise");
+  if (!score) {
+    throw new Error("Only score-partwise MusicXML is supported");
+  }
+  return score;
+}
+
+/**
+ * @param {File|Blob|ArrayBuffer} fileOrBuffer
+ * @param {string} [fileName]
+ * @returns {Promise<string>}
+ */
+export async function loadMusicXmlText(fileOrBuffer, fileName = "") {
+  const name = (
+    fileName || (fileOrBuffer instanceof File ? fileOrBuffer.name : "")
+  ).toLowerCase();
+  const buffer =
+    fileOrBuffer instanceof ArrayBuffer
+      ? fileOrBuffer
+      : await fileOrBuffer.arrayBuffer();
+  if (name.endsWith(".mxl") || looksLikeZip(buffer)) {
+    return unzipMxl(buffer);
+  }
+  return new TextDecoder("utf-8").decode(buffer);
+}
+
+/**
+ * @param {ArrayBuffer} buffer
+ */
+function looksLikeZip(buffer) {
+  if (buffer.byteLength < 4) return false;
+  const u8 = new Uint8Array(buffer);
+  return u8[0] === 0x50 && u8[1] === 0x4b;
+}
+
+/**
+ * @param {ArrayBuffer} buffer
+ * @returns {Promise<string>}
+ */
+async function unzipMxl(buffer) {
+  if (typeof JSZip === "undefined") {
+    throw new Error("JSZip is required to read .mxl files");
+  }
+  const zip = await JSZip.loadAsync(buffer);
+  const containerFile = zip.file("META-INF/container.xml");
+  if (containerFile) {
+    const containerXml = await containerFile.async("string");
+    const containerDoc = parseXmlDocument(containerXml);
+    const rootFile = containerDoc.querySelector("rootfile");
+    const fullPath = rootFile?.getAttribute("full-path");
+    if (fullPath) {
+      const scoreFile = zip.file(fullPath);
+      if (scoreFile) {
+        return scoreFile.async("string");
+      }
+    }
+  }
+
+  const names = Object.keys(zip.files).filter(
+    (n) =>
+      !zip.files[n].dir &&
+      (n.toLowerCase().endsWith(".xml") ||
+        n.toLowerCase().endsWith(".musicxml")) &&
+      !n.toLowerCase().includes("meta-inf"),
+  );
+  if (!names.length) {
+    throw new Error("No MusicXML score found inside .mxl");
+  }
+  names.sort((a, b) => a.length - b.length);
+  return zip.file(names[0]).async("string");
+}
+
+/**
+ * @param {number} alter
+ * @returns {string}
+ */
+function alterToAccidental(alter) {
+  if (!alter) return "";
+  if (alter > 0) return "#".repeat(alter);
+  return "-".repeat(-alter);
+}
+
+/**
+ * @param {Element} pitchEl
+ * @returns {string}
+ */
+export function pitchElementToName(pitchEl) {
+  const step = pitchEl.querySelector("step")?.textContent?.trim() || "";
+  const octave = pitchEl.querySelector("octave")?.textContent?.trim() || "";
+  const alterText = pitchEl.querySelector("alter")?.textContent?.trim();
+  const alter =
+    alterText === undefined || alterText === "" ? 0 : Number(alterText);
+  if (!step || octave === "") {
+    throw new Error("Incomplete pitch element");
+  }
+  return `${step}${alterToAccidental(alter)}${octave}`;
+}
+
+/**
+ * music21-compatible beat / bar / sixteenth helpers.
+ * @param {number} beats
+ * @param {number} beatType
+ */
+export function meterInfo(beats, beatType) {
+  const compound = beatType === 8 && beats % 3 === 0;
+  const beatQl = compound ? 1.5 : 4 / beatType;
+  const barQl = compound ? (beats / 3) * 1.5 : beats * (4 / beatType);
+  // Fixed sixteenth grid (0.25 QL).
+  const sixteenthQl = 0.25;
+  return { beatQl, barQl, sixteenthQl };
+}
+
+/** MusicXML beat-unit → quarter lengths */
+const BEAT_UNIT_QL = {
+  maxima: 32,
+  longa: 16,
+  breve: 8,
+  whole: 4,
+  half: 2,
+  quarter: 1,
+  eighth: 0.5,
+  "16th": 0.25,
+  "32nd": 0.125,
+  "64th": 0.0625,
+  "128th": 0.03125,
+  "256th": 0.015625,
+  "512th": 0.0078125,
+  "1024th": 0.00390625,
+};
+
+/** Display symbols for common metronome units */
+const BEAT_UNIT_SYMBOL = {
+  whole: "𝅝",
+  half: "𝅗𝅥",
+  quarter: "♩",
+  eighth: "𝅘𝅥𝅮",
+  "16th": "𝅘𝅥𝅯",
+  "32nd": "𝅘𝅥𝅰",
+};
+
+/**
+ * @param {string} unit
+ * @param {boolean} dotted
+ * @returns {string}
+ */
+export function beatUnitSymbol(unit, dotted = false) {
+  const base = BEAT_UNIT_SYMBOL[unit] || unit;
+  return dotted ? `${base}.` : base;
+}
+
+/**
+ * Convert a metronome marking to quarter-note BPM.
+ * @param {string} unit
+ * @param {number} bpm
+ * @param {boolean} dotted
+ * @returns {number | null}
+ */
+export function metronomeToQuarterBpm(unit, bpm, dotted = false) {
+  let ql = BEAT_UNIT_QL[unit];
+  if (ql === undefined || !Number.isFinite(bpm) || bpm <= 0) return null;
+  if (dotted) ql *= 1.5;
+  return bpm * ql;
+}
+
+/**
+ * @param {Document|Element} score
+ * @returns {{
+ *   unit: string,
+ *   bpm: number,
+ *   dotted: boolean,
+ *   symbol: string,
+ *   quarterBpm: number,
+ * } | null}
+ */
+function readMetronome(score) {
+  const metro = score.querySelector("metronome");
+  if (!metro) return null;
+  const unit = metro.querySelector("beat-unit")?.textContent?.trim();
+  const perMinText = metro.querySelector("per-minute")?.textContent?.trim();
+  if (!unit || !perMinText) return null;
+  const bpm = Number(perMinText);
+  if (!Number.isFinite(bpm) || bpm <= 0) return null;
+  const dotted = !!metro.querySelector("beat-unit-dot");
+  const quarterBpm = metronomeToQuarterBpm(unit, bpm, dotted);
+  if (quarterBpm === null) return null;
+  return {
+    unit,
+    bpm,
+    dotted,
+    symbol: beatUnitSymbol(unit, dotted),
+    quarterBpm,
+  };
+}
+
+/**
+ * Light peek: meters + first tempo marking (no note walk).
+ * Accepts XML string or a parsed Document (reuse after parse).
+ * @param {string | Document} xmlTextOrDoc
+ * @returns {{
+ *   beats: number,
+ *   beatType: number,
+ *   numDivisions: number,
+ *   meters: { beats: number, beatType: number, numDivisions: number }[],
+ *   metronome: { unit: string, bpm: number, dotted: boolean, symbol: string, quarterBpm: number } | null,
+ *   scoreTempo: number | null,
+ *   suggestedTempo: number | null,
+ * }}
+ */
+export function peekScoreSettings(xmlTextOrDoc) {
+  const score = scorePartwise(asDocument(xmlTextOrDoc));
+
+  /** @type {{ beats: number, beatType: number, numDivisions: number }[]} */
+  const meters = [];
+  let beats = 4;
+  let beatType = 4;
+
+  const part = score.querySelector("part");
+  if (part) {
+    for (const measureEl of part.children) {
+      if (!measureEl.tagName || measureEl.tagName.toLowerCase() !== "measure") {
+        continue;
+      }
+      for (const child of measureEl.children) {
+        if (!child.tagName || child.tagName.toLowerCase() !== "attributes") {
+          continue;
+        }
+        const timeEl = child.querySelector("time");
+        if (!timeEl) continue;
+        const b = timeEl.querySelector("beats")?.textContent;
+        const bt = timeEl.querySelector("beat-type")?.textContent;
+        if (b) beats = Number(b.trim()) || beats;
+        if (bt) beatType = Number(bt.trim()) || beatType;
+        const { barQl, sixteenthQl } = meterInfo(beats, beatType);
+        const numDivisions = Math.max(1, Math.round(barQl / sixteenthQl));
+        const last = meters[meters.length - 1];
+        if (!last || last.beats !== beats || last.beatType !== beatType) {
+          meters.push({ beats, beatType, numDivisions });
+        }
+      }
+    }
+  }
+
+  if (!meters.length) {
+    const { barQl, sixteenthQl } = meterInfo(4, 4);
+    meters.push({
+      beats: 4,
+      beatType: 4,
+      numDivisions: Math.max(1, Math.round(barQl / sixteenthQl)),
+    });
+  }
+
+  const metronome = readMetronome(score);
+  let scoreTempo = null;
+  if (metronome) {
+    scoreTempo = metronome.quarterBpm;
+  } else {
+    const soundEl = score.querySelector("sound[tempo]");
+    if (soundEl) {
+      const t = Number(soundEl.getAttribute("tempo"));
+      if (Number.isFinite(t) && t > 0) scoreTempo = t;
+    }
+  }
+
+  const first = meters[0];
+  return {
+    beats: first.beats,
+    beatType: first.beatType,
+    numDivisions: first.numDivisions,
+    meters,
+    metronome,
+    scoreTempo,
+    suggestedTempo: scoreTempo === null ? null : snapYeepsTempo(scoreTempo),
+  };
+}
+
+/**
+ * @param {string | Document} xmlTextOrDoc
+ * @returns {{
+ *   measuresData: Record<number, Record<number, string[]>>,
+ *   measureDivisions: Record<number, number>,
+ * }}
+ */
+export function extractPitchesByMeasureAndDivision(xmlTextOrDoc) {
+  const score = scorePartwise(asDocument(xmlTextOrDoc));
+  /** @type {Record<number, Record<number, string[]>>} */
+  const measuresData = {};
+  /** @type {Record<number, number>} */
+  const measureDivisions = {};
+  const parts = score.querySelectorAll("part");
+  if (!parts.length) {
+    throw new Error("No parts found in score");
+  }
+
+  for (const part of parts) {
+    const measureEls = [...part.children].filter(
+      (el) => el.tagName && el.tagName.toLowerCase() === "measure",
+    );
+    if (!measureEls.length) continue;
+
+    let divisions = 1;
+    let beats = 4;
+    let beatType = 4;
+    const firstMeasureNumber = Number(
+      measureEls[0].getAttribute("number") || "1",
+    );
+
+    for (const measureEl of measureEls) {
+      const measureNumber = Number(measureEl.getAttribute("number") || "0");
+      if (!measuresData[measureNumber]) {
+        measuresData[measureNumber] = {};
+      }
+
+      let cursor = 0;
+      let maxCursor = 0;
+      let lastNoteOnset = 0;
+      /** @type {{ offsetDiv: number, pitch: string }[]} */
+      const events = [];
+
+      for (const child of measureEl.children) {
+        const tag = child.tagName.toLowerCase();
+        if (tag === "attributes") {
+          const divEl = child.querySelector("divisions");
+          if (divEl?.textContent) {
+            divisions = Number(divEl.textContent.trim()) || divisions;
+          }
+          const timeEl = child.querySelector("time");
+          if (timeEl) {
+            const b = timeEl.querySelector("beats")?.textContent;
+            const bt = timeEl.querySelector("beat-type")?.textContent;
+            if (b) beats = Number(b.trim()) || beats;
+            if (bt) beatType = Number(bt.trim()) || beatType;
+          }
+          continue;
+        }
+
+        if (tag === "backup") {
+          const d = Number(child.querySelector("duration")?.textContent || "0");
+          cursor = Math.max(0, cursor - d);
+          continue;
+        }
+
+        if (tag === "forward") {
+          const d = Number(child.querySelector("duration")?.textContent || "0");
+          cursor += d;
+          maxCursor = Math.max(maxCursor, cursor);
+          continue;
+        }
+
+        if (tag !== "note") continue;
+        if (child.querySelector("grace")) continue;
+
+        const isChord = !!child.querySelector("chord");
+        const duration = Number(
+          child.querySelector("duration")?.textContent || "0",
+        );
+        const isRest = !!child.querySelector("rest");
+        const ties = [...child.querySelectorAll("tie")];
+        const isTieContinuation = ties.some(
+          (t) => t.getAttribute("type") === "stop",
+        );
+
+        if (isChord) {
+          if (!isRest && !isTieContinuation) {
+            const pitchEl = child.querySelector("pitch");
+            if (pitchEl) {
+              events.push({
+                offsetDiv: lastNoteOnset,
+                pitch: pitchElementToName(pitchEl),
+              });
+            }
+          }
+          continue;
+        }
+
+        lastNoteOnset = cursor;
+        if (!isRest && !isTieContinuation) {
+          const pitchEl = child.querySelector("pitch");
+          if (pitchEl) {
+            events.push({
+              offsetDiv: cursor,
+              pitch: pitchElementToName(pitchEl),
+            });
+          }
+        }
+        cursor += duration;
+        maxCursor = Math.max(maxCursor, cursor);
+      }
+
+      const { barQl, sixteenthQl } = meterInfo(beats, beatType);
+      const slots = Math.max(1, Math.round(barQl / sixteenthQl));
+      measureDivisions[measureNumber] = slots;
+      const measureDurationQl = maxCursor / divisions;
+
+      let offsetAdjustment = 0;
+      if (
+        measureNumber === firstMeasureNumber &&
+        measureDurationQl < barQl - 1e-9
+      ) {
+        offsetAdjustment = barQl - measureDurationQl;
+      }
+
+      for (const ev of events) {
+        const offsetQl = ev.offsetDiv / divisions + offsetAdjustment;
+        const divisionIndex = Math.floor(offsetQl / sixteenthQl + 1e-9);
+        if (!measuresData[measureNumber][divisionIndex]) {
+          measuresData[measureNumber][divisionIndex] = [];
+        }
+        measuresData[measureNumber][divisionIndex].push(ev.pitch);
+      }
+    }
+  }
+  return { measuresData, measureDivisions };
+}
