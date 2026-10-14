@@ -11,7 +11,7 @@ The Yeeps Note Extractor is a web-based application designed to extract musical 
 ## Getting Started
 
 1. **Access the Application:**
-   - Goto [https://fr0gl3af.github.io/yeeps-note-extractor](https://fr0gl3af.github.io/yeeps-note-extractor).
+   - Goto [https://fr0gl3af.github.io/yeeps-note-extractor](https://fr0g-l3af.github.io/yeeps-note-extractor).
 
 ## Usage
 
